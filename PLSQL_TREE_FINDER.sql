@@ -4,7 +4,7 @@ DECLARE
         FROM dba_objects
         WHERE object_type = 'PACKAGE BODY'
         AND owner = 'VU_SFI'
-        --AND object_name = 'SF_QPORTAL_WEB_TRANV2'
+        --AND object_name = 'SF_QTRAS_OPIN'
         ;
 
     v_subprogram VARCHAR2(128);
@@ -192,7 +192,7 @@ DECLARE
     -- Función optimizada usando hash table
     FUNCTION is_reserved_word(p_name VARCHAR2) RETURN BOOLEAN IS
         v_upper_name VARCHAR2(50) := UPPER(TRIM(p_name));
-        v_result BOOLEAN;
+        v_result BOOLEAN;       
     BEGIN
         -- Check cache first to avoid repeated lookups
         IF v_reserved_cache.EXISTS(v_upper_name) THEN
@@ -201,8 +201,7 @@ DECLARE
         
         -- Lookup and cache result
         v_result := v_reserved_words.EXISTS(v_upper_name);
-        v_reserved_cache(v_upper_name) := v_result;
-        
+        v_reserved_cache(v_upper_name) := v_result;      
         RETURN v_result;
     END is_reserved_word;
     
@@ -305,7 +304,7 @@ BEGIN
             END LOOP;
         END;
         
-        --DBMS_OUTPUT.PUT_LINE('Total subprogramas cargados: ' || v_package_subprograms.COUNT);
+       -- DBMS_OUTPUT.PUT_LINE('Total subprogramas cargados: ' || v_package_subprograms.COUNT);
         
         -- PASO 2: ANALIZAR DEPENDENCIAS CON CONOCIMIENTO PRECISO DE SUBPROGRAMAS
         --DBMS_OUTPUT.PUT_LINE('=== PASO 2: ANALIZANDO DEPENDENCIAS ===');
@@ -326,7 +325,7 @@ BEGIN
         v_delete_pattern CONSTANT VARCHAR2(100) := 'DELETE\s+FROM\s+([A-Z_][A-Z0-9_]*)';
         v_select_pattern CONSTANT VARCHAR2(100) := 'FROM\s+([A-Z_][A-Z0-9_]*)';
         v_call_pattern CONSTANT VARCHAR2(100) := '([A-Z_][A-Z0-9_]*)\s*\(';
-        v_ext_call_pattern CONSTANT VARCHAR2(100) := '\b[A-Z_][A-Z0-9_]*\.[A-Z_][A-Z0-9_]*\s*\(';
+        v_ext_call_pattern CONSTANT VARCHAR2(100) := '[A-Z_][A-Z0-9_]*\.[A-Z_][A-Z0-9_]*\s*\(';
     BEGIN
         
         -- Procesar código fuente con BULK COLLECT para mejorar rendimiento
@@ -469,59 +468,74 @@ BEGIN
                         TYPE t_call_tab IS TABLE OF t_call_rec;
                         v_calls t_call_tab := t_call_tab();
                     BEGIN
-                        -- Buscar todas las llamadas externas Package.Procedure(
+                        -- Buscar llamadas externas con paréntesis en la misma línea
                         LOOP
-                            -- Buscar el patrón desde la posición actual usando patrón precompilado
                             v_match_start := REGEXP_INSTR(v_upper_line, v_ext_call_pattern, v_pos);
                             EXIT WHEN v_match_start = 0;
-                            
-                            -- Extraer la coincidencia completa
-                            v_full_match := REGEXP_SUBSTR(v_upper_line, '\b[A-Z_][A-Z0-9_]*\.[A-Z_][A-Z0-9_]*\s*\(', v_match_start);
-                            
+                            v_full_match := REGEXP_SUBSTR(v_upper_line, '[A-Z_][A-Z0-9_]*\.[A-Z_][A-Z0-9_]*\s*\(', v_match_start);
                             IF v_full_match IS NOT NULL THEN
-                                -- Método manual más confiable: buscar posiciones del punto y paréntesis
                                 v_point_pos := INSTR(v_full_match, '.');
                                 v_paren_pos := INSTR(v_full_match, '(');
-                                
                                 IF v_point_pos > 1 AND v_paren_pos > v_point_pos THEN
-                                    -- Extraer package (desde el inicio hasta el punto)
                                     v_package := TRIM(SUBSTR(v_full_match, 1, v_point_pos - 1));
-                                    
-                                    -- Extraer procedure (desde después del punto hasta el paréntesis)
                                     v_proc := TRIM(SUBSTR(v_full_match, v_point_pos + 1, v_paren_pos - v_point_pos - 1));
-                                    
-                                    -- Debug específico
-                                    /*
-                                    IF v_package LIKE '%QDIGITO%' OR v_proc LIKE '%CALCULA%' THEN
-                                        DBMS_OUTPUT.PUT_LINE('FULL_MATCH: [' || v_full_match || ']');
-                                        DBMS_OUTPUT.PUT_LINE('POINT_POS: ' || v_point_pos || ', PAREN_POS: ' || v_paren_pos);
-                                        DBMS_OUTPUT.PUT_LINE('EXTRACTED PACKAGE: [' || NVL(v_package, 'NULL') || ']');
-                                        DBMS_OUTPUT.PUT_LINE('EXTRACTED PROC: [' || NVL(v_proc, 'NULL') || ']');
-                                    END IF;
-                                    */
-                                    -- Validar y procesar solo si ambos valores son válidos
                                     IF v_package IS NOT NULL AND v_proc IS NOT NULL AND 
                                        LENGTH(v_package) >= 3 AND LENGTH(v_proc) >= 3 AND
                                        NOT is_reserved_word(v_package) AND NOT is_reserved_word(v_proc) THEN
-                                        -- Almacenar para procesamiento en lote
                                         v_calls.EXTEND;
                                         v_calls(v_calls.COUNT) := t_call_rec(v_package, v_proc);
                                     END IF;
                                 END IF;
                             END IF;
-                            
-                            -- Avanzar posición después del match actual
                             v_pos := v_match_start + NVL(LENGTH(v_full_match), 1);
-                            
-                            -- Seguridad: evitar bucle infinito
                             EXIT WHEN v_pos > LENGTH(v_upper_line);
                         END LOOP;
+
+                        -- Buscar llamadas externas donde el nombre package.procedure está en una línea y el paréntesis en la siguiente
+                        IF i < v_source_lines.COUNT THEN
+                            DECLARE
+                                v_next_line VARCHAR2(4000) := UPPER(TRIM(v_source_lines(i+1).text));
+                                v_pkg_proc_match VARCHAR2(128);
+                                v_dot_pos NUMBER;
+                            BEGIN
+                                -- Si la línea actual es solo package.procedure y la siguiente línea inicia con '('
+                                IF REGEXP_LIKE(v_upper_line, '^[A-Z_][A-Z0-9_]*\.[A-Z_][A-Z0-9_]*$') AND REGEXP_LIKE(v_next_line, '^\(') THEN
+                                    v_pkg_proc_match := TRIM(v_upper_line);
+                                    v_dot_pos := INSTR(v_pkg_proc_match, '.');
+                                    IF v_dot_pos > 1 THEN
+                                        v_package := SUBSTR(v_pkg_proc_match, 1, v_dot_pos - 1);
+                                        v_proc := SUBSTR(v_pkg_proc_match, v_dot_pos + 1);
+                                        IF v_package IS NOT NULL AND v_proc IS NOT NULL AND 
+                                           LENGTH(v_package) >= 3 AND LENGTH(v_proc) >= 3 AND
+                                           NOT is_reserved_word(v_package) AND NOT is_reserved_word(v_proc) THEN
+                                            v_calls.EXTEND;
+                                            v_calls(v_calls.COUNT) := t_call_rec(v_package, v_proc);
+                                        END IF;
+                                    END IF;
+                                END IF;
+                            END;
+                        END IF;
                         
                         -- Procesamiento en lote para mejorar rendimiento
                         IF v_calls.COUNT > 0 THEN
                             FOR i IN 1..v_calls.COUNT LOOP
-                                add_row(obj.owner, obj.object_name, obj.object_type, v_subprogram,
-                                    NULL, v_calls(i).package_name, v_calls(i).proc_name, 'PACKAGE', 'CALL');
+                                    DECLARE
+                                        v_called_owner VARCHAR2(128);
+                                    BEGIN
+                                        -- Try to resolve the owner of the called package/procedure
+                                        SELECT owner INTO v_called_owner
+                                        FROM dba_procedures
+                                        WHERE object_name = v_calls(i).package_name
+                                          AND procedure_name = v_calls(i).proc_name
+                                          AND ROWNUM = 1;
+                                        add_row(obj.owner, obj.object_name, obj.object_type, v_subprogram,
+                                            v_called_owner, v_calls(i).package_name, v_calls(i).proc_name, 'PACKAGE', 'CALL');
+                                    EXCEPTION
+                                        WHEN NO_DATA_FOUND THEN
+                                            -- If not found, insert with NULL owner
+                                            add_row(obj.owner, obj.object_name, obj.object_type, v_subprogram,
+                                                NULL, v_calls(i).package_name, v_calls(i).proc_name, 'PACKAGE', 'CALL');
+                                    END;
                             END LOOP;
                         END IF;
                     END;
@@ -533,56 +547,71 @@ BEGIN
                     END IF;
                     */
                     -- LLAMADAS INTERNAS - USANDO DBA_PROCEDURES PARA PRECISIÓN MÁXIMA
-                    IF REGEXP_LIKE(v_upper_line, '[A-Z_][A-Z0-9_]*\s*\(') THEN
+                        -- Nueva lógica para detectar llamadas internas con paréntesis en la misma o siguiente línea
                         DECLARE
                             v_pos NUMBER := 1;
                             v_match VARCHAR2(128);
-                            -- Collection para acumular llamadas y procesarlas en lote
                             TYPE t_internal_call_rec IS RECORD (
                                 proc_name VARCHAR2(128)
                             );
                             TYPE t_internal_call_tab IS TABLE OF t_internal_call_rec;
                             v_internal_calls_list t_internal_call_tab := t_internal_call_tab();
                         BEGIN
+                            -- Buscar llamadas con paréntesis en la misma línea
                             LOOP
-                                /*
-                                -- DEBUG: mostrar info si la línea contiene INS_GE_TAUXIL
-                                IF INSTR(v_upper_line, 'INS_GE_TAUXIL') > 0 THEN
-                                    DBMS_OUTPUT.PUT_LINE('DEBUG INTERNAL CALL: línea ' || src.line || ' contiene INS_GE_TAUXIL. subprogram=' || NVL(v_subprogram,'NULL') || ', match=' || NVL(v_match,'NULL'));
-                                    DBMS_OUTPUT.PUT_LINE('DEBUG INTERNAL CALL1: v_upper_line=' || v_upper_line|| ', v_call_pattern=' || v_call_pattern || ', v_pos=' || v_pos);
-                                END IF;
-                                */
                                 v_match := REGEXP_SUBSTR(v_upper_line, v_call_pattern, v_pos, 1, NULL, 1);
                                 EXIT WHEN v_match IS NULL;
-
-                                -- DEBUG: mostrar info si la línea contiene INS_GE_TAUXIL
-                                /*
-                                IF INSTR(v_upper_line, 'INS_GE_TAUXIL') > 0 THEN
-                                    DBMS_OUTPUT.PUT_LINE('DEBUG INTERNAL CALL2: línea ' || src.line || ' contiene INS_GE_TAUXIL. subprogram=' || NVL(v_subprogram,'NULL') || ', match=' || NVL(v_match,'NULL'));
-                                END IF;
-                                */
-                                -- Verificar usando DBA_PROCEDURES (más preciso)
-                                IF -- comparación eliminada: ahora se registran todas las llamadas internas, incluyendo recursivas
-                                   NOT is_reserved_word(v_match) AND 
-                                   is_package_subprogram(v_match) THEN
-                                    -- Acumular para procesamiento en lote
+                                IF NOT is_reserved_word(v_match) AND is_package_subprogram(v_match) THEN
                                     v_internal_calls_list.EXTEND;
                                     v_internal_calls_list(v_internal_calls_list.COUNT) := t_internal_call_rec(v_match);
                                 END IF;
-
                                 v_pos := REGEXP_INSTR(v_upper_line, v_call_pattern, v_pos) + 1;
                                 EXIT WHEN v_pos = 1;
                             END LOOP;
-                            
+
+                            -- Buscar llamadas donde el nombre del procedimiento está en una línea y el paréntesis en la siguiente
+                            IF i < v_source_lines.COUNT THEN
+                                DECLARE
+                                    v_next_line VARCHAR2(4000) := TRIM(v_source_lines(i+1).text);
+                                    v_next_line_upper VARCHAR2(4000) := UPPER(v_next_line);
+                                BEGIN
+
+                                    IF INSTR(v_upper_line, 'GRABA_TRASLADO') > 0 THEN
+                                        DBMS_OUTPUT.PUT_LINE('DEBUG: Línea ' || src.line || ' contiene GRABA_TRASLADO: ' || v_upper_line || ' v_next_line: ' || v_next_line);
+                                    END IF;
+                                    -- Si la línea actual es solo el nombre de un subprograma y la siguiente línea inicia con '('
+                                    IF REGEXP_LIKE(v_upper_line, '^[A-Z_][A-Z0-9_]*$') AND REGEXP_LIKE(v_next_line, '^\(') THEN
+                                        IF INSTR(v_upper_line, 'GRABA_TRASLADO') > 0 THEN
+                                            DBMS_OUTPUT.PUT_LINE('MATCH: Línea ' || src.line || ' contiene GRABA_TRASLADO: ' || v_upper_line || ' v_next_line: ' || v_next_line);
+                                        END IF;
+                                        -- Sanitize v_match to remove hidden characters
+                                        v_match := REPLACE(REPLACE(REPLACE(TRIM(v_upper_line), CHR(10), ''), CHR(13), ''), CHR(9), '');
+
+                                    IF INSTR(v_upper_line, 'GRABA_TRASLADO') > 0 THEN                                        
+                                        DBMS_OUTPUT.PUT_LINE('DEBUG: v_match=' || v_match ||
+                                            ' is_reserved_word=' || CASE WHEN is_reserved_word(v_match) THEN 'TRUE' ELSE 'FALSE' END ||
+                                            ' is_package_subprogram=' || CASE WHEN is_package_subprogram(v_match) THEN 'TRUE' ELSE 'FALSE' END);
+                                        DBMS_OUTPUT.PUT_LINE('DEBUG: v_match="' || v_match || '" length=' || LENGTH(v_match));
+                                    END IF;
+
+                                        IF NOT is_reserved_word(v_match) AND is_package_subprogram(v_match) THEN
+                                            v_internal_calls_list.EXTEND;
+                                            v_internal_calls_list(v_internal_calls_list.COUNT) := t_internal_call_rec(v_match);
+                                            IF INSTR(v_upper_line, 'GRABA_TRASLADO') > 0 THEN
+                                                DBMS_OUTPUT.PUT_LINE('GUARDA: Línea ' || src.line || ' contiene GRABA_TRASLADO: ' || v_upper_line);
+                                            END IF;
+                                        END IF;
+                                    END IF;
+                                END;
+                            END IF;
+
                             -- Procesar todas las llamadas internas acumuladas en un lote
-                            FOR i IN 1..v_internal_calls_list.COUNT LOOP
-                                -- CORREGIDO: ahora se pasa el nombre del procedimiento llamado en called_subprogram
+                            FOR j IN 1..v_internal_calls_list.COUNT LOOP
                                 add_row(obj.owner, obj.object_name, obj.object_type, v_subprogram,
-                                    obj.owner, obj.object_name, v_internal_calls_list(i).proc_name, 
-                                    get_subprogram_type(v_internal_calls_list(i).proc_name), 'CALL');
+                                    obj.owner, obj.object_name, v_internal_calls_list(j).proc_name, 
+                                    get_subprogram_type(v_internal_calls_list(j).proc_name), 'CALL');
                             END LOOP;
                         END;
-                    END IF;
                 END IF;
                 
             EXCEPTION
@@ -595,6 +624,7 @@ BEGIN
     END;
         
     -- ESTADÍSTICAS FINALES
+        /*
         DBMS_OUTPUT.PUT_LINE('=== ESTADÍSTICAS FINALES ===');
         DBMS_OUTPUT.PUT_LINE('Total líneas analizadas: ' || v_total_lines);
         DBMS_OUTPUT.PUT_LINE('Líneas procesadas: ' || v_processed_lines);
@@ -607,6 +637,7 @@ BEGIN
         
         -- MOSTRAR SUBPROGRAMAS ENCONTRADOS EN DBA_PROCEDURES
         DBMS_OUTPUT.PUT_LINE('=== SUBPROGRAMAS DESDE DBA_PROCEDURES ===');
+        */
         DECLARE
             v_name VARCHAR2(128);
         BEGIN
